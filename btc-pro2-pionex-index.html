@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC PRO V5 - Pionex Auto Trading</title>
+    <link rel="manifest" href="data:application/manifest+json,{
+        'name': 'BTC PRO V5',
+        'short_name': 'BTCPro',
+        'start_url': '.',
+        'display': 'standalone',
+        'background_color': '#000',
+        'theme_color': '#f7931a',
+        'icons': [{'src': 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2280%22>₿</text></svg>', 'sizes': 'any'}]
+    }">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #000; color: #fff; text-align:center; padding:20px; min-height:100vh; }
+        h1 { color:#f7931a; font-size:2.2rem; margin:15px 0; text-shadow: 0 0 10px #f7931a; }
+        #price { font-size:3.5rem; color:#0f0; margin:25px; font-weight:bold; text-shadow: 0 0 15px #0f0; }
+        #signal { font-size:1.4rem; margin:20px; padding:16px; border-radius:15px; font-weight:bold; }
+        .strong-buy { background:#1a4d1a; color:#0f0; border:2px solid #0f0; }
+        .buy { background:#4d4d1a; color:#ff0; border:2px solid #ff0; }
+        .strong-sell { background:#4d1a1a; color:#f00; border:2px solid #f00; }
+        .btn { padding:16px 40px; background:#f7931a; color:#000; border:none; border-radius:50px; font-weight:bold; cursor:pointer; margin:15px; font-size:1.3rem; }
+        .btn:hover { background:#ff9500; }
+        #indicators { margin:20px; font-size:1rem; line-height:2; background:rgba(255,255,255,0.05); padding:15px; border-radius:12px; }
+        .footer { margin-top:30px; font-size:0.8rem; color:#888; }
+    </style>
+</head>
+<body>
+    <h1>BTC PRO V5 - Pionex Live</h1>
+    <div id="price">Connecting to Binance...</div>
+    <div id="indicators">Loading Indicators...</div>
+    <div id="signal" class="buy">Checking 7 Indicators...</div>
+    <button class="btn" onclick="checkNow()">CHECK NOW</button>
+    <div class="footer">Strategy: 7 Indicators + Volume | Signal at 5/7 | Pionex Auto Trading ON</div>
+
+    <script>
+        // ←←← YAHAN APNA PIONEX WEBHOOK URL PASTE KAR DO ←←←
+        const PIONEX_WEBHOOK = 'https://www.pionex.com/signal/api/v1/signal_listener/trading_view?token=7d2c7dd0-0e48-4f29-982d-d1b516368972';
+
+        const BOT_TOKEN = '8344115140:AAEiUx-CpLV_QTN1N0I7zWWZZBEiM6AAW5Y';
+        const CHAT_ID = '1349670684';
+
+        let lastSignalTime = 0;
+        const COOLDOWN = 5 * 60 * 1000;   // 5 min cooldown
+        let ws, price = 0, candles = [];
+
+        // ============== PIONEX WEBHOOK FUNCTION ==============
+        async function sendToPionex(direction) {
+            if (!PIONEX_WEBHOOK.includes('pionex')) return;  // safety check
+            const payload = {
+                message: JSON.stringify({
+                    action: direction,      // "long" or "short"
+                    symbol: "BTCUSDT",
+                    quantity: 0.01
+                })
+            };
+            try {
+                await fetch(PIONEX_WEBHOOK, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                console.log('Pionex signal sent:', direction);
+            } catch (e) {
+                console.error('Pionex webhook failed:', e);
+            }
+        }
+
+        // ============== BINANCE WEBSOCKET & CANDLES (same as before) ==============
+        function connectWebSocket() {
+            ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                price = parseFloat(data.p).toFixed(2);
+                document.getElementById('price').innerHTML = `<span style="color:#0f0;">BTC: $${price}</span>`;
+            };
+            ws.onclose = () => setTimeout(connectWebSocket, 1000);
+        }
+
+        async function fetchCandles() {
+            try {
+                const res = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100');
+                const data = await res.json();
+                candles = data.map(d => ({
+                    open: parseFloat(d[1]),
+                    high: parseFloat(d[2]),
+                    low: parseFloat(d[3]),
+                    close: parseFloat(d[4]),
+                    volume: parseFloat(d[5])
+                }));
+                checkStrategy();
+            } catch (e) { console.error(e); }
+        }
+
+        async function sendTelegram(msg) {
+            if (!BOT_TOKEN.includes(':')) return;
+            try {
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage?chat_id=${CHAT_ID}&text=${encodeURIComponent(msg)}&parse_mode=Markdown`);
+            } catch (e) { console.error(e); }
+        }
+
+        // ============== MAIN STRATEGY (unchanged) ==============
+        function checkStrategy() {
+            if (candles.length < 50) return;
+            const c = candles.map(x => x.close);
+            const h = candles.map(x => x.high);
+            const l = candles.map(x => x.low);
+            const v = candles.map(x => x.volume);
+
+            let scoreBuy = 0, scoreSell = 0;
+            let reasonsBuy = [], reasonsSell = [];
+
+            // 1. RSI
+            const rsi = calcRSI(c, 14);
+            if (rsi < 32) { scoreBuy++; reasonsBuy.push(`RSI ${rsi.toFixed(1)}`); }
+            if (rsi > 68) { scoreSell++; reasonsSell.push(`RSI ${rsi.toFixed(1)}`); }
+
+            // 2. MACD
+            const macd = calcMACD(c);
+            if (macd.line > macd.signal && macd.hist > 0) { scoreBuy++; reasonsBuy.push('MACD Bull'); }
+            if (macd.line < macd.signal && macd.hist < 0) { scoreSell++; reasonsSell.push('MACD Bear'); }
+
+            // 3. Bollinger Bands
+            const bb = calcBB(c, 20, 2);
+            if (c[c.length-1] > bb.upper) { scoreBuy++; reasonsBuy.push('BB Break Up'); }
+            if (c[c.length-1] < bb.lower) { scoreSell++; reasonsSell.push('BB Break Down'); }
+
+            // 4. Stochastic
+            const stoch = calcStoch(h, l, c, 14);
+            if (stoch.k < 25) { scoreBuy++; reasonsBuy.push(`Stoch ${stoch.k.toFixed(1)}`); }
+            if (stoch.k > 75) { scoreSell++; reasonsSell.push(`Stoch ${stoch.k.toFixed(1)}`); }
+
+            // 5. EMA Golden Cross
+            const ema50 = calcEMA(c, 50);
+            const ema200 = calcEMA(c, 200);
+            if (ema50 > ema200) { scoreBuy++; reasonsBuy.push('EMA Bull'); }
+            if (ema50 < ema200) { scoreSell++; reasonsSell.push('EMA Bear'); }
+
+            // 6. Trend
+            if (c[c.length-1] > ema50 && ema50 > ema200) { scoreBuy++; reasonsBuy.push('Trend Up'); }
+            if (c[c.length-1] < ema50 && ema50 < ema200) { scoreSell++; reasonsSell.push('Trend Down'); }
+
+            // 7. Volume Spike
+            const avgVol = v.slice(0, -1).reduce((a,b)=>a+b,0)/(v.length-1);
+            if (v[v.length-1] > avgVol * 1.8) {
+                if (c[c.length-1] > c[c.length-2]) { scoreBuy++; reasonsBuy.push('Vol Spike'); }
+                else { scoreSell++; reasonsSell.push('Vol Dump'); }
+            }
+
+            document.getElementById('indicators').innerHTML = `
+                <div style="color:#f7931a;">BUY: ${scoreBuy}/7 | SELL: ${scoreSell}/7</div>
+                RSI: ${rsi.toFixed(1)} | MACD: ${macd.line.toFixed(2)} | EMA: ${ema50 > ema200 ? 'Bull' : 'Bear'}
+            `;
+
+            const now = Date.now();
+
+            if (scoreBuy >= 5 && (now - lastSignalTime > COOLDOWN)) {
+                const tp = (parseFloat(price) + 1500).toFixed(2);
+                const sl = (parseFloat(price) - 750).toFixed(2);
+                const msg = `*BTC LONG SIGNAL* \nEntry: $${price}\nTP: $${tp} (+1500)\nSL: $${sl} (-750)\nScore: ${scoreBuy}/7\n${reasonsBuy.join(' • ')}`;
+                sendTelegram(msg);
+                sendToPionex('long');   // ←← YEH LINE PIONEX PE AUTO TRADE KHULEGI
+                document.getElementById('signal').innerHTML = `<div class="strong-buy">LONG → PIONEX + TELEGRAM (${scoreBuy}/7)</div>`;
+                lastSignalTime = now;
+
+            } else if (scoreSell >= 5 && (now - lastSignalTime > COOLDOWN)) {
+                const tp = (parseFloat(price) - 1500).toFixed(2);
+                const sl = (parseFloat(price) + 750).toFixed(2);
+                const msg = `*BTC SHORT SIGNAL* \nEntry: $${price}\nTP: $${tp} (-1500)\nSL: $${sl} (+750)\nScore: ${scoreSell}/7\n${reasonsSell.join(' • ')}`;
+                sendTelegram(msg);
+                sendToPionex('short');  // ←← YEH LINE PIONEX PE AUTO SHORT KHULEGI
+                document.getElementById('signal').innerHTML = `<div class="strong-sell">SHORT → PIONEX + TELEGRAM (${scoreSell}/7)</div>`;
+                lastSignalTime = now;
+
+            } else {
+                document.getElementById('signal').innerHTML = `<div class="buy">BUY: ${scoreBuy}/7 | SELL: ${scoreSell}/7 - Waiting</div>`;
+            }
+        }
+
+        function checkNow() { fetchCandles(); }
+
+        // Start
+        connectWebSocket();
+        fetchCandles();
+        setInterval(fetchCandles, 60000);
+
+        // Indicator functions (same as your original)
+        function calcRSI(c, p) { let g=0, l=0; for(let i=c.length-p; i<c.length; i++){ const d=c[i]-c[i-1]; if(d>0)g+=d; else l-=d; } return 100 - (100/(1+(g/l||0))); }
+        function calcMACD(c) { const e12=calcEMA(c,12), e26=calcEMA(c,26); const line=e12-e26; return {line, signal:0, hist:line}; }
+        function calcBB(c,p,s){ const sma=c.slice(-p).reduce((a,b)=>a+b,0)/p; const dev=Math.sqrt(c.slice(-p).reduce((a,v)=>a+Math.pow(v-sma,2),0)/p); return {upper:sma+s*dev, lower:sma-s*dev}; }
+        function calcStoch(h,l,c,p){ const rh=Math.max(...h.slice(-p)); const rl=Math.min(...l.slice(-p)); return {k:((c[c.length-1]-rl)/(rh-rl))*100}; }
+        function calcEMA(c,p){ const k=2/(p+1); let e=c[0]; for(let i=1;i<c.length;i++) e=c[i]*k+e*(1-k); return e; }
+    </script>
+</body>
+</html>
